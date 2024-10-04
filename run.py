@@ -4,6 +4,8 @@ import os
 import networkx as nx
 import polars as pl
 
+epochs = 15
+
 ##########################
 mammals_json_file = os.path.join("data", "opehr_concepts.csv")
 
@@ -34,6 +36,9 @@ mapping_df = pl.DataFrame({
     'original_id': list(node_to_index.keys()),
     'node_index': list(node_to_index.values())
 })
+
+first_column_df = mapping_df.select('original_id')
+names = first_column_df['original_id'].to_list()
 
 # Save to 'output/node_mapping.csv'
 output_path = 'output/node_mapping.csv'
@@ -66,6 +71,16 @@ model = PoincareEmbedding(
     embedding_dim=3,
     manifold=poincare_ball,
 )
+
+import torch
+
+# id to fix: 441840
+original_id_to_fix = 441840
+index_to_fix = mapping_df.filter(pl.col('original_id') == original_id_to_fix)['node_index'].to_numpy()[0]
+epsilon = 1e-5
+# Get the embedding dimension dynamically
+embedding_dim = model.embedding_dim
+
 
 # model.to(device=).... # mps???
 
@@ -104,6 +119,12 @@ for epoch in range(10):
         dists = model(edges)
         loss = poincare_embeddings_loss(dists=dists, targets=edge_label_targets)
         loss.backward()
+
+        # Before optimizer.step(), reset the specific embedding to near-zero
+        with torch.no_grad():
+            model.weight.tensor[index_to_fix] = torch.full((embedding_dim,), epsilon, device=model.weight.tensor.device)
+
+
         optimizer.step()
 
         average_loss += loss
@@ -119,7 +140,10 @@ optimizer = RiemannianAdam(
     lr=0.3,
 )
 
-for epoch in range(50):
+# Define the path where you want to save the model's state dictionary
+model_save_path = "output/poincare_model_dim_3.pt"
+
+for epoch in range(epochs):
     average_loss = 0
     for idx, (edges, edge_label_targets) in enumerate(dataloader):
         optimizer.zero_grad()
@@ -127,9 +151,23 @@ for epoch in range(50):
         dists = model(edges)
         loss = poincare_embeddings_loss(dists=dists, targets=edge_label_targets)
         loss.backward()
+
+        # Before optimizer.step(), reset the specific embedding to near-zero
+        with torch.no_grad():
+            model.weight.tensor[index_to_fix] = torch.full((embedding_dim,), epsilon, device=model.weight.tensor.device)
+
         optimizer.step()
 
         average_loss += loss
 
     average_loss /= len(dataloader)
     print(f"Epoch {epoch} loss: {average_loss}")
+    state = {
+        "state_dict": model.state_dict(),
+        "names": names
+    }
+
+    # Save the model's state dictionary
+    torch.save(state, model_save_path)
+    print(f"Model saved to {model_save_path}")
+
